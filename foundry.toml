@@ -2,7 +2,8 @@
 src = 'src'
 out = 'out'
 libs = ['lib']
-remappings = ['@openzeppelin/=node_modules/@openzeppelin/', 'forge-std/=lib/forge-std/src']
+# For simplicity we are just remapping the entire JBX-v3 repo, but we should prob just include the needed interfaces in the designated folder
+remappings = ['@openzeppelin/=node_modules/@openzeppelin/', 'forge-std/=lib/forge-std/src', '@jbx-protocol/=node_modules/@jbx-protocol/']
 fuzz_runs = 256
 gas_reports = ["*"]
 eth-rpc-url = 'https://mainnet.infura.io/v3/9928b52099854248b3a096be07a6b23c'
