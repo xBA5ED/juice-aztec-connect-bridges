@@ -23,11 +23,33 @@ import {JBTokens} from "@jbx-protocol/juice-contracts-v3/contracts/libraries/JBT
  *      sent to it.
  */
 contract JuiceboxBridge is BridgeBase {
+
+    // TODO: Divide these more effectiently (more to price, less to operation)
+    uint64 public constant OPERATION_BIT_LENGTH = 6;
+    uint64 public constant PROJECT_ID_BIT_LENGTH = 32;
+    uint64 public constant PRICE_BIT_LENGTH = 26;
+    uint64 public constant EXPONENT_BIT_LENGTH = 5;
+    
+    // Binary number 0000000000000000000000000000000011111111111111111111111111111111 (last 32 bits)
+    uint64 public constant PROJECT_ID_MASK = 0xFFFFFFFF;
+    // Binary number 0000000000000000000000000000000000000011111111111111111111111111 (last 26 bits)
+    uint64 public constant PRICE_MASK = 0x3FFFFFF;
+    // Binary number 0000000000000000000000000000000000000000000000000000000000011111 (last 5 bits)
+    uint64 public constant EXPONENT_MASK = 0x1F;
+
     // The directory that the bridge uses
     IJBDirectory directory = IJBDirectory(0x65572FB928b46f9aDB7cfe5A4c41226F636161ea);
     IJBTokenStore tokenstore = IJBTokenStore(0x6FA996581D7edaABE62C15eaE19fEeD4F1DdDfE7);
 
+    enum BridgeOperations {
+        DONATE,
+        PAY,
+        REDEEM
+    }
+
+    error InvalidOperation();
     error InsufficientAmountOut();
+    error Overflow();
 
     // @dev Event which is emitted when the output token doesn't implement decimals().
     event DefaultDecimalsWarning();
@@ -90,83 +112,83 @@ contract JuiceboxBridge is BridgeBase {
             bool
         )
     {
-        bool _isPay = _auxData >> 63 == 1;
-        uint32 _minPrice = uint32(32 >> _auxData );
-        uint256 _projectId = uint32(_auxData);
+        // Decode the auxData to the fields we need
+        (
+            BridgeOperations _operation,
+            uint256 _projectId,
+            uint256 _minPrice
+        ) = decodeAuxData(_auxData);
 
+        // If the operation type is Donate then there should be no output token
+        if ( _operation == BridgeOperations.DONATE && (_outputAssetA.assetType != AztecTypes.AztecAssetType.NOT_USED || _minPrice != 0))
+            revert ErrorLib.InvalidOutputA(); 
+
+        // Verify the input asset type and convert Aztec ETH address to Juicebox ETH address
         address _inToken;
-        if(_inputAssetA.assetType == AztecTypes.AztecAssetType.ERC20){
+        if (_inputAssetA.assetType == AztecTypes.AztecAssetType.ERC20) {
             _inToken = _inputAssetA.erc20Address;
-        }else if(_inputAssetA.assetType == AztecTypes.AztecAssetType.ETH){
+        } else if (_inputAssetA.assetType == AztecTypes.AztecAssetType.ETH) {
             _inToken = JBTokens.ETH;
-        }else{
+        } else {
             revert ErrorLib.InvalidInputA();
         }
 
-         address _outToken;
-         if(_outputAssetA.assetType == AztecTypes.AztecAssetType.ERC20){
-            _inToken = _outputAssetA.erc20Address;
-         }else if(_outputAssetA.assetType == AztecTypes.AztecAssetType.ETH){
-             _outToken = JBTokens.ETH;
-         }else if(_outputAssetA.assetType == AztecTypes.AztecAssetType.NOT_USED){
-             // This is a pure donation and the user will not receive a token in exchange
-             require(_minPrice == 0, "For donations the minPrice should be 0");
-         }else{
-             revert ErrorLib.InvalidOutputA();
-         }
-
-        // 1: Pay
-        // 2: Redeem
-        if (_isPay) {
-            // Does the user expect tokens in return, or is this a pure donation
-            if (_outToken != address(0)){
-                outputValueA = performPay(
-                    _projectId,
-                    _totalInputValue,
-                    _inToken
-                );
-            }else{
-                 performDonation(
-                    _projectId,
-                    _totalInputValue,
-                    _inToken
-                );
-            }
-            
+        // Verify the output asset type and convert Aztec ETH address to Juicebox ETH address
+        address _outToken;
+        if (_outputAssetA.assetType == AztecTypes.AztecAssetType.ERC20) {
+            _outToken = _outputAssetA.erc20Address;
+        } else if (_outputAssetA.assetType == AztecTypes.AztecAssetType.ETH) {
+            _outToken = JBTokens.ETH;
+        } else if (_outputAssetA.assetType == AztecTypes.AztecAssetType.NOT_USED && _operation == BridgeOperations.DONATE ) {
+            // NOT_USED is only allowed with donations, if NOT_USED is set and this is not a donation we revert
         } else {
+            revert ErrorLib.InvalidOutputA();
+        }
+
+        // Calculate the minOutAmount if needed and perform the operation
+        uint256 _amountOutMinimum = _outToken != address(0) ? (_totalInputValue * _minPrice) / 10**_getTokenDecimals(_outToken) : 0;
+        if (_operation == BridgeOperations.PAY) {
+            outputValueA = performPay(
+                _projectId,
+                _totalInputValue,
+                _inToken,
+                _amountOutMinimum
+            );
+
+        } else if (_operation == BridgeOperations.DONATE) {
+             performDonation(
+                 _projectId,
+                 _totalInputValue,
+                 _inToken
+            );
+            
+        } else if (_operation == BridgeOperations.REDEEM){
             // Verify that the projectId uses the inputAsset as their projectToken
             require(address(tokenstore.tokenOf(_projectId)) == _inToken, "This is not the project's token");
 
             outputValueA = performRedeem(
                 _projectId,
                 _totalInputValue,
-                _outToken
+                _outToken,
+                _amountOutMinimum
             );
+
+        }else{
+            revert InvalidOperation();
         }
 
-         //uint256 tokenInDecimals = 18;
-        // try IERC20Metadata(_inputAssetA.erc20Address).decimals() returns (uint8 decimals) {
-            //     tokenInDecimals = decimals;
-            // } catch (bytes memory) {
-            //     emit DefaultDecimalsWarning();
-            // }
-
-       
         // If this was not a pure donation then we have to forward the tokens
-        if (_outToken != address(0) && outputValueA != 0) {
+        if (_operation != BridgeOperations.DONATE) {
+
             if (_outToken == JBTokens.ETH) {
                 IRollupProcessor(ROLLUP_PROCESSOR).receiveEthFromBridge{value: outputValueA}(_interactionNonce);
-            }else{
-                // Approve rollup processor to output
-                IERC20(_outputAssetA.erc20Address).approve(ROLLUP_PROCESSOR, outputValueA);
-            }
-        }else{
-            // If this was a pure donation then we always return 0
-            outputValueA = 0;
-        }
+            } else {
+                IERC20Metadata _token = IERC20Metadata(_outToken);
 
-        //uint256 amountOutMinimum = (_totalInputValue * _minPrice) / 10**tokenInDecimals;
-        //if (outputValueA < amountOutMinimum) revert InsufficientAmountOut();
+                // Approve rollup processor to output
+                _token.approve(ROLLUP_PROCESSOR, outputValueA);
+            }
+        }
 
         // Pay out subsidy to the rollupBeneficiary
         // SUBSIDY.claimSubsidy(
@@ -194,7 +216,8 @@ contract JuiceboxBridge is BridgeBase {
     function performPay(
         uint256 _projectId,
         uint256 _amount,
-        address _token
+        address _token,
+        uint256 _amountOutMinimum
     ) internal returns (uint256 output) {
         IJBPaymentTerminal _terminal = directory.primaryTerminalOf(_projectId, _token);
 
@@ -206,7 +229,7 @@ contract JuiceboxBridge is BridgeBase {
             _token,
             address(this),
             // We let min returned tokens as 0, we'll check after we received it
-            0,
+            _amountOutMinimum,
             // We do prefer to receive ERC20
             true,
             // The message the UI will show
@@ -239,7 +262,8 @@ contract JuiceboxBridge is BridgeBase {
     function performRedeem(
         uint256 _projectId,
         uint256 _amount,
-        address _token
+        address _token,
+        uint256 _amountOutMinimum
     ) internal returns (uint256 output) {
         IJBPayoutRedemptionPaymentTerminal _terminal = IJBPayoutRedemptionPaymentTerminal(
             address(directory.primaryTerminalOf(_projectId, _token))
@@ -255,10 +279,104 @@ contract JuiceboxBridge is BridgeBase {
             _amount,
             // if the output is ETH we have to use the Juicebox ETH address
             _token,
-            0,
+            _amountOutMinimum,
             payable(this),
             "Powered by Aztec!",
             bytes("")
         );
+    }
+
+    function encodeAuxData(
+        uint8 _operation,
+        uint32 _projectId,
+        address _tokenIn,
+        uint256 _amountIn,
+        uint256 _minAmountOut
+    ) external view returns (uint64 auxData){
+        // Calc the min price, unless operation is donate then minPrice is always 0
+        uint256 _minPrice = _operation != 0 ? _computeEncodedMinPrice(
+            _amountIn,
+            _minAmountOut,
+            _getTokenDecimals(_tokenIn)
+        ) : 0;
+
+        auxData = _operation;
+        auxData = auxData << PROJECT_ID_BIT_LENGTH | _projectId;
+        auxData = auxData << PRICE_BIT_LENGTH | uint64(_minPrice);
+    }
+
+
+    /**
+     * Decodes the AUX data
+     */
+    function decodeAuxData(
+        uint64 _auxData
+    ) public pure returns (
+        BridgeOperations _operation,
+        uint32 _projectId,
+        uint256 _minPrice
+    ) {
+        _minPrice = _decodeMinPrice(_auxData & PRICE_MASK);
+        _projectId = uint32((_auxData >> PRICE_BIT_LENGTH) & PROJECT_ID_MASK);
+        _operation = BridgeOperations(_auxData >> (PRICE_BIT_LENGTH + PROJECT_ID_BIT_LENGTH));
+    }
+
+    /**
+     * From UniswapBridge
+     * 
+     * @notice A function which converts minimum price in a floating point format to integer.
+     * @param _encodedMinPrice - Encoded minimum price (in the last 26 bits of uint256)
+     * @return minPrice - Minimum acceptable price represented as an integer
+     */
+    function _decodeMinPrice(uint256 _encodedMinPrice) internal pure returns (uint256 minPrice) {
+        // 21 bits significand, 5 bits exponent
+        uint256 significand = _encodedMinPrice >> 5;
+        uint256 exponent = _encodedMinPrice & EXPONENT_MASK;
+        minPrice = significand * 10**exponent;
+    }
+
+    /**
+     * From UniswapBridge
+     * 
+     * @notice A function which computes min price and encodes it in the format used in this bridge.
+     * @param _amountIn - Amount of tokenIn to swap
+     * @param _minAmountOut - Amount of tokenOut to receive
+     * @param _tokenInDecimals - Number of decimals of tokenIn
+     * @return encodedMinPrice - Min acceptable encoded in a format used in this bridge.
+     * @dev This function is not optimized and is expected to be used on frontend and in tests.
+     * @dev Reverts when min price is bigger than max encodeable value.
+     */
+    function _computeEncodedMinPrice(
+        uint256 _amountIn,
+        uint256 _minAmountOut,
+        uint256 _tokenInDecimals
+    ) internal pure returns (uint256 encodedMinPrice) {
+        uint256 minPrice = (_minAmountOut * 10**_tokenInDecimals) / _amountIn;
+        // 2097151 = 2**21 - 1 --> this number and its multiples of 10 can be encoded without precision loss
+        if (minPrice <= 2097151) {
+            // minPrice is smaller than the boundary of significand --> significand = _x, exponent = 0
+            encodedMinPrice = minPrice << 5;
+        } else {
+            uint256 exponent = 0;
+            while (minPrice > 2097151) {
+                minPrice /= 10;
+                ++exponent;
+                // 31 = 2**5 - 1 --> max exponent
+                if (exponent > 31) revert Overflow();
+            }
+            encodedMinPrice = (minPrice << 5) + exponent;
+        }
+    }
+
+    function _getTokenDecimals(address _token) internal view returns(uint8) {
+        // ETH has 18 decimals
+        if (_token == JBTokens.ETH) return 18;
+
+        try IERC20Metadata(_token).decimals() returns (uint8 decimals) {
+            return decimals;
+        } catch (bytes memory) {
+            // if the try failed we default to using 18
+            return 18;
+        }
     }
 }

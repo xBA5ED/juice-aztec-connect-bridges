@@ -60,15 +60,15 @@ contract JuiceboxBridgeUnitTest is BridgeTestBase {
         bridge.convert(emptyAsset, emptyAsset, emptyAsset, emptyAsset, 0, 0, 0, address(0));
     }
 
-    function testInvalidOutputAssetType() public {
-        AztecTypes.AztecAsset memory inputAssetA = AztecTypes.AztecAsset({
-            id: 0,
-            erc20Address: address(0),
-            assetType: AztecTypes.AztecAssetType.ETH
-        });
-        vm.expectRevert(ErrorLib.InvalidOutputA.selector);
-        bridge.convert(inputAssetA, emptyAsset, emptyAsset, emptyAsset, 0, 0, 0, address(0));
-    }
+    // function testInvalidOutputAssetType() public {
+    //     AztecTypes.AztecAsset memory inputAssetA = AztecTypes.AztecAsset({
+    //         id: 0,
+    //         erc20Address: address(0),
+    //         assetType: AztecTypes.AztecAssetType.ETH
+    //     });
+    //     vm.expectRevert(ErrorLib.InvalidOutputA.selector);
+    //     bridge.convert(inputAssetA, emptyAsset, emptyAsset, emptyAsset, 0, 0, 0, address(0));
+    // }
 
     function testExampleBridgeUnitTestFixed() public {
         testEthDonation(10 ether);
@@ -128,10 +128,51 @@ contract JuiceboxBridgeUnitTest is BridgeTestBase {
 //         // assertGt(BENEFICIARY.balance, 0, "Subsidy was not claimed");
 //     }
 
+    function testEncodeDecodeAuxData(uint8 _operation, uint32 _projectId, uint120 _minPrice) public {
+        // Operation only has 6 bits and not full 8
+        vm.assume(_operation < 3);
+
+        // Encode the data
+        uint64 _encoded = bridge.encodeAuxData(
+            _operation,
+            _projectId,
+            address(DAI),
+            1 ether,
+            _minPrice
+        );
+
+        // Decode the data
+        (JuiceboxBridge.BridgeOperations _d_operation, uint32 _d_projectId, uint _d_minPrice) = bridge.decodeAuxData(_encoded);
+
+        // Make sure the input and output are equal
+        assertEq(
+            uint8(_d_operation),
+            _operation,
+            "Operation was not decoded correctly"
+        );
+
+        assertEq(
+            _d_projectId,
+            _projectId,
+            "ProjectID was not decoded correctly"
+        );
+
+        // _minPrice is always 0 when donating
+        if (_operation == 0) return;
+
+        // Get the difference between the input and the output
+        uint256 _precisionError = _d_minPrice > _minPrice ? _d_minPrice - _minPrice : _minPrice - _d_minPrice;
+        // Make sure the precision error is not more then 0.001% for a uint120
+        assertLe(
+            _precisionError,
+            _minPrice / 100_000
+        );
+    }
 
     function testEthDonation(uint96 _ethAmount) public {
+        vm.assume(_ethAmount > 0);
         vm.warp(block.timestamp + 1 days);
-        uint256 _projectId = 1;
+        uint32 _projectId = 1;
 
         // Define an input asset
         AztecTypes.AztecAsset memory inputAssetA = AztecTypes.AztecAsset({
@@ -140,15 +181,18 @@ contract JuiceboxBridgeUnitTest is BridgeTestBase {
             assetType: AztecTypes.AztecAssetType.ETH
         });
 
-        // Action is pay
-        uint64 _auxData = 1 << 63;
-        // Min price is 0, since this is a donation
-        _auxData = _auxData | uint64(0) << 32;
-        // Projecy ID is 1
-        _auxData = _auxData | uint64(_projectId);
-
         // Give this contract the ETH for the donation
         deal(address(this), _ethAmount);
+
+        uint64 _auxData = bridge.encodeAuxData(
+            0, // pay (or donate)
+            _projectId,
+            address(0),
+            _ethAmount,
+            0
+        );
+
+        bridge.decodeAuxData(_auxData);
 
         vm.expectEmit(true, true, false, true);
         emit AddToBalance(
@@ -159,6 +203,7 @@ contract JuiceboxBridgeUnitTest is BridgeTestBase {
             bytes(''),
             address(bridge)
         );
+        
 
         (uint256 outputValueA, uint256 outputValueB, bool isAsync) = bridge.convert{value: _ethAmount}(
             inputAssetA, // _inputAssetA - definition of an input asset
