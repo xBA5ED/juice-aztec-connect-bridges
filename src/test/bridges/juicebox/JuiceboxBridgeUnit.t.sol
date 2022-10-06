@@ -8,13 +8,17 @@ import {AztecTypes} from "../../../aztec/libraries/AztecTypes.sol";
 // JB-specific imports
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ErrorLib} from "../../../bridges/base/ErrorLib.sol";
-import {JuiceboxBridge} from "../../../bridges/juicebox/JuiceboxBridge.sol";
-import {IJBPayoutRedemptionPaymentTerminal} from "@jbx-protocol/juice-contracts-v3/contracts/interfaces/IJBPayoutRedemptionPaymentTerminal.sol";
+import "../../../bridges/juicebox/JuiceboxBridge.sol";
+import {IJBSingleTokenPaymentTerminal} from "@jbx-protocol/juice-contracts-v3/contracts/interfaces/IJBSingleTokenPaymentTerminal.sol";
 
 // @notice The purpose of this test is to directly test convert functionality of the bridge.
 contract JuiceboxBridgeUnitTest is BridgeTestBase {
     address private constant DAI = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
     address private constant BENEFICIARY = address(11);
+
+    // The directory that the bridge uses
+    IJBDirectory directory = IJBDirectory(0x65572FB928b46f9aDB7cfe5A4c41226F636161ea);
+    IJBTokenStore tokenstore = IJBTokenStore(0x6FA996581D7edaABE62C15eaE19fEeD4F1DdDfE7);
 
     address private rollupProcessor;
     // The reference to the example bridge
@@ -70,67 +74,11 @@ contract JuiceboxBridgeUnitTest is BridgeTestBase {
     //     bridge.convert(inputAssetA, emptyAsset, emptyAsset, emptyAsset, 0, 0, 0, address(0));
     // }
 
-    function testExampleBridgeUnitTestFixed() public {
-        testEthDonation(10 ether);
-    }
 
-    // @notice The purpose of this test is to directly test convert functionality of the bridge.
-    // @dev In order to avoid overflows we set _depositAmount to be uint96 instead of uint256.
-//     function testEthDonation1(uint96 _ethAmount) public {
-//         vm.warp(block.timestamp + 1 days);
-//         uint256 _project = 1;
-
-//         // Define an input asset
-//         AztecTypes.AztecAsset memory inputAssetA = AztecTypes.AztecAsset({
-//             id: 0,
-//             erc20Address: address(0),
-//             assetType: AztecTypes.AztecAssetType.ETH
-//         });
-
-
-//         uint64 _auxData = 1 << 63;
-//         _auxData = _auxData | uint64(0) << 32;
-//         _auxData = _auxData | uint64(1);
-
-//         // Rollup processor transfers ERC20 tokens to the bridge before calling convert. Since we are calling
-//         // bridge.convert(...) function directly we have to transfer the funds in the test on our own. In this case
-//         // we'll solve it by directly minting the _depositAmount of Dai to the bridge.
-//         deal(address(this), _ethAmount);
-
-//         // Store dai balance before interaction to be able to verify the balance after interaction is correct
-//         //uint256 daiBalanceBefore = IERC20(DAI).balanceOf(rollupProcessor);
-
-//         (uint256 outputValueA, uint256 outputValueB, bool isAsync) = bridge.convert{value: _ethAmount}(
-//             inputAssetA, // _inputAssetA - definition of an input asset
-//             emptyAsset, // _inputAssetB - not used so can be left empty
-//             emptyAsset, // _outputAssetA - in this example equal to input asset
-//             emptyAsset, // _outputAssetB - not used so can be left empty
-//             _ethAmount, // _totalInputValue - an amount of input asset A sent to the bridge
-//             0, // _interactionNonce
-//             _auxData, // _auxData - not used in the example bridge
-//             BENEFICIARY // _rollupBeneficiary - address, the subsidy will be sent to
-//         );
-
-//         // Now we transfer the funds back from the bridge to the rollup processor
-//         // In this case input asset equals output asset so I only work with the input asset definition
-//         // Basically in all the real world use-cases output assets would differ from input assets
-//         //IERC20(inputAssetA.erc20Address).transferFrom(address(bridge), rollupProcessor, outputValueA);
-
-//         //assertEq(outputValueA, _ethAmount, "Output value A doesn't equal deposit amount");
-//         assertEq(outputValueA, 0, "Output value A is not 0");
-//         // assertTrue(!isAsync, "Bridge is incorrectly in an async mode");
-// // 
-//         // uint256 daiBalanceAfter = IERC20(DAI).balanceOf(rollupProcessor);
-// // 
-//         // assertEq(daiBalanceAfter - daiBalanceBefore, _depositAmount, "Balances must match");
-// // 
-//         // SUBSIDY.withdraw(BENEFICIARY);
-//         // assertGt(BENEFICIARY.balance, 0, "Subsidy was not claimed");
-//     }
-
-    function testEncodeDecodeAuxData(uint8 _operation, uint32 _projectId, uint120 _minPrice) public {
+    function testEncodeDecodeAuxData(uint8 _operation_uint8, uint32 _projectId, uint120 _minPrice) public {
         // Operation only has 6 bits and not full 8
-        vm.assume(_operation < 3);
+        vm.assume(_operation_uint8 < 3);
+        JuiceboxBridge.BridgeOperations _operation = JuiceboxBridge.BridgeOperations(_operation_uint8);
 
         // Encode the data
         uint64 _encoded = bridge.encodeAuxData(
@@ -147,7 +95,7 @@ contract JuiceboxBridgeUnitTest is BridgeTestBase {
         // Make sure the input and output are equal
         assertEq(
             uint8(_d_operation),
-            _operation,
+            uint8(_operation),
             "Operation was not decoded correctly"
         );
 
@@ -157,38 +105,63 @@ contract JuiceboxBridgeUnitTest is BridgeTestBase {
             "ProjectID was not decoded correctly"
         );
 
-        // _minPrice is always 0 when donating
-        if (_operation == 0) return;
-
-        // Get the difference between the input and the output
-        uint256 _precisionError = _d_minPrice > _minPrice ? _d_minPrice - _minPrice : _minPrice - _d_minPrice;
-        // Make sure the precision error is not more then 0.001% for a uint120
-        assertLe(
-            _precisionError,
-            _minPrice / 100_000
-        );
+        if (_operation != JuiceboxBridge.BridgeOperations.DONATE){
+            // Get the difference between the input and the output
+            uint256 _precisionError = _d_minPrice > _minPrice ? _d_minPrice - _minPrice : _minPrice - _d_minPrice;
+            // Make sure the precision error is not more then 0.001% for a uint120
+            assertLe(
+                _precisionError,
+                _minPrice / 100_000
+            );
+        }else{
+            // _minPrice is always 0 when donating
+            assertEq(
+                _d_minPrice,
+                0
+            );
+        }
     }
 
-    function testEthDonation(uint96 _ethAmount) public {
-        vm.assume(_ethAmount > 0);
-        vm.warp(block.timestamp + 1 days);
-        uint32 _projectId = 1;
+    function testDonateToJuiceboxDAO() public {
+        // Test 10 ether donation to JuiceboxDAO
+        testDonateToProject(10 ether);
+    }
 
-        // Define an input asset
-        AztecTypes.AztecAsset memory inputAssetA = AztecTypes.AztecAsset({
-            id: 0,
-            erc20Address: address(0),
-            assetType: AztecTypes.AztecAssetType.ETH
-        });
+    function testDonateToProject(uint96 _amount) public {
+        vm.assume(_amount > 0);
+        uint8 _projectId = 1; // TODO: once more projects are configured we can fuzz test on random ones
 
-        // Give this contract the ETH for the donation
-        deal(address(this), _ethAmount);
+        // Make sure we can pay this project and get a token we can pay them with
+        (address _token, bool _canPay) = _getProjectPaymentToken(_projectId);
+        vm.assume(_canPay);
+
+        // Convert to Aztec asset
+        AztecTypes.AztecAsset memory inputAssetA;
+        if(_token == JBTokens.ETH){
+            inputAssetA = AztecTypes.AztecAsset({
+                id: 0,
+                erc20Address: address(0),
+                assetType: AztecTypes.AztecAssetType.ETH
+            });
+
+            // Give this contract the ETH for the donation
+            deal(address(this), _amount);
+        } else{
+            inputAssetA = AztecTypes.AztecAsset({
+                id: 0,
+                erc20Address: _token,
+                assetType: AztecTypes.AztecAssetType.ERC20
+            });
+
+            // Give this contract the ETH for the donation
+            deal(_token, address(this), _amount);
+        }
 
         uint64 _auxData = bridge.encodeAuxData(
-            0, // pay (or donate)
+            JuiceboxBridge.BridgeOperations.DONATE, // pay (or donate)
             _projectId,
             address(0),
-            _ethAmount,
+            _amount,
             0
         );
 
@@ -197,20 +170,19 @@ contract JuiceboxBridgeUnitTest is BridgeTestBase {
         vm.expectEmit(true, true, false, true);
         emit AddToBalance(
             _projectId,
-            _ethAmount,
+            _amount,
             0,
             "Powered by Aztec!",
             bytes(''),
             address(bridge)
         );
         
-
-        (uint256 outputValueA, uint256 outputValueB, bool isAsync) = bridge.convert{value: _ethAmount}(
+        (uint256 outputValueA, uint256 outputValueB, bool isAsync) = bridge.convert{value: _token == JBTokens.ETH ? _amount : 0}(
             inputAssetA, // _inputAssetA - definition of an input asset
             emptyAsset, // _inputAssetB - not used so can be left empty
             emptyAsset, // _outputAssetA - in this example equal to input asset
             emptyAsset, // _outputAssetB - not used so can be left empty
-            _ethAmount, // _totalInputValue - an amount of input asset A sent to the bridge
+            _amount, // _totalInputValue - an amount of input asset A sent to the bridge
             0, // _interactionNonce
             _auxData, // _auxData - not used in the example bridge
             BENEFICIARY // _rollupBeneficiary - address, the subsidy will be sent to
@@ -220,6 +192,14 @@ contract JuiceboxBridgeUnitTest is BridgeTestBase {
         assertEq(outputValueA, 0, "Output value A is not 0");
     }
 
+
+    // Currently there is only 1 fully configured project on V3 and that is JuiceboxDAO, we'll use this later 
+    function _getProjectPaymentToken(uint32 _projectId) internal returns (address _token, bool _canPayProject){
+        IJBPaymentTerminal[] memory _terminals = directory.terminalsOf(_projectId);
+        if(_terminals.length == 0) return (address(0), false);
+
+        return (IJBSingleTokenPaymentTerminal(address(_terminals[0])).token(), true);
+    }
 
     event AddToBalance(
         uint256 indexed projectId,

@@ -286,28 +286,35 @@ contract JuiceboxBridge is BridgeBase {
         );
     }
 
+    /**
+     * @notice encodes the needed data to a uint64 for compatibility with Aztec
+     */
     function encodeAuxData(
-        uint8 _operation,
+        BridgeOperations _operation,
         uint32 _projectId,
         address _tokenIn,
         uint256 _amountIn,
         uint256 _minAmountOut
     ) external view returns (uint64 auxData){
         // Calc the min price, unless operation is donate then minPrice is always 0
-        uint256 _minPrice = _operation != 0 ? _computeEncodedMinPrice(
+        uint256 _minPrice = _operation != BridgeOperations.DONATE ? _computeEncodedMinPrice(
             _amountIn,
             _minAmountOut,
             _getTokenDecimals(_tokenIn)
         ) : 0;
 
-        auxData = _operation;
+        auxData = uint64(_operation);
         auxData = auxData << PROJECT_ID_BIT_LENGTH | _projectId;
         auxData = auxData << PRICE_BIT_LENGTH | uint64(_minPrice);
     }
 
 
     /**
-     * Decodes the AUX data
+     * Decodes the AUX data into the needed data for Juicebox
+     * @param _auxData uint64 containing encoded data
+     * @return _operation the bridge operation that the user(s) request
+     * @return _projectId the project to perform the operation to
+     * @return _minPrice the minimum price per token the user(s) want to receive
      */
     function decodeAuxData(
         uint64 _auxData
@@ -320,7 +327,7 @@ contract JuiceboxBridge is BridgeBase {
         _projectId = uint32((_auxData >> PRICE_BIT_LENGTH) & PROJECT_ID_MASK);
         _operation = BridgeOperations(_auxData >> (PRICE_BIT_LENGTH + PROJECT_ID_BIT_LENGTH));
     }
-
+    
     /**
      * From UniswapBridge
      * 
@@ -368,6 +375,11 @@ contract JuiceboxBridge is BridgeBase {
         }
     }
 
+    /**
+     * @notice attempts to get the decimals from a token, defaults to 18 if we can't fetch the token decimals
+     * @param _token the token to get the decimals for
+     * @return decimals of the token (or 18 as default)
+     */
     function _getTokenDecimals(address _token) internal view returns(uint8) {
         // ETH has 18 decimals
         if (_token == JBTokens.ETH) return 18;
